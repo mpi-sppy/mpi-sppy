@@ -134,7 +134,7 @@ def do_one_mmw(dirname, modname, runefstring, npyfile, mmwargstring):
     os.chdir("..")
     os.chdir("..")  # moved to CI directory
 
-# -------- First part: farmer family --------
+# -------- First part: farmer family, usar, netdes --------
 if run_first_part:
     do_one("farmer/CI", "farmer_ef.py", 1,
            "1 3 {}".format(solver_name))
@@ -218,8 +218,7 @@ if run_first_part:
            f"--max-iterations=3 --default-rho=1 --lagrangian --xhatshuffle "
            f"--output-dir=solutions_ws {usar_problem_args}")
 
-# -------- Second part: netdes, sizes, sslp, hydro, aircond, MMW --------
-if run_second_part:
+    # netdes
     # NOTE: Pyomo OBBT does not support persistent solvers as of Aug 2025
     direct_solver_name = solver_name.replace("_persistent", "_direct") if "_persistent" in solver_name else solver_name
     do_one("netdes", "netdes_cylinders.py", 4,
@@ -239,6 +238,27 @@ if run_second_part:
            "--subgradient-hub --xhatshuffle --max-solver-threads=2 "
            "--solver-name={}".format(solver_name))
 
+    # Smoke-test netdes's average_scenario_creator end-to-end on both
+    # jensens paths. PH hub + lagrangian + xhatshuffle = 3 cylinders.
+    # Lagrangian sends the average-scenario dual bound as its first
+    # outer bound. Xhatshuffle takes the average-scenario primal x as
+    # its first xhat candidate and evaluates it across the real
+    # scenarios; that evaluation often fails (the average x can be
+    # infeasible for a real demand, and netdes has no penalty/dummy
+    # variable), so the xhat-jensens path is required to silently skip
+    # such candidates rather than crash. This run exercises that
+    # tolerance.
+    do_one("netdes", "../../mpisppy/generic_cylinders.py", 3,
+           "--module-name netdes --max-iterations=3 "
+           "--instance-name=network-10-20-L-01 --netdes-data-path ./data "
+           "--rel-gap=0.0 --default-rho=10000 --presolve "
+           "--lagrangian --xhatshuffle "
+           "--lagrangian-try-jensens-first --xhatshuffle-try-jensens-first "
+           "--max-solver-threads=2 "
+           "--solver-name={}".format(solver_name))
+
+# -------- Second part: sizes, sslp, hydro, aircond, MMW --------
+if run_second_part:
     # sizes is slow for xpress so try linearizing the proximal term.
     do_one("sizes",
            "sizes_cylinders.py",

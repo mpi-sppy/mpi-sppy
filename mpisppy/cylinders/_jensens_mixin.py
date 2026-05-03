@@ -156,3 +156,61 @@ class _JensensMixin:
         cache format consumed by Xhat_Eval._fix_nonants / .evaluate.
         Two-stage: ROOT only."""
         return {"ROOT": np.array(nonant_values, dtype='d')}
+
+    def _jensens_evaluate_xhat(self, nonant_cache):
+        """Evaluate the average-scenario nonants as a candidate xhat
+        across all real scenarios and return the expected objective, or
+        ``None`` if at least one scenario is infeasible at this xhat.
+
+        Mirrors the two-stage branch of
+        ``mpisppy.extensions.xhatbase.XhatBase._try_one``: fix nonants,
+        solve every local scenario with ``need_solution=False`` (so
+        infeasible solves don't raise), then check
+        ``self.opt.no_incumbent_prob()``. If any scenario was infeasible,
+        return ``None`` so the caller can silently skip the candidate;
+        every xhat spoke already tolerates a None-valued xhat in its
+        normal main loop, since infeasibility is a routine outcome of
+        candidate evaluation.
+
+        We deliberately do NOT use ``Xhat_Eval.evaluate`` here.
+        ``evaluate`` calls ``solve_loop(compute_val_at_nonant=True)``,
+        which then unconditionally evaluates ``pyo.value(objfct)`` on
+        each local scenario, crashing when a solve produced no solution
+        (e.g. infeasibility with no slack/penalty variables).
+        """
+        self.opt._fix_nonants(nonant_cache)
+        solver_options = self.opt.options.get("solver_options")
+        self.opt.solve_loop(
+            solver_options=solver_options,
+            verbose=False,
+            tee=False,
+            need_solution=False,
+        )
+        if self.opt.no_incumbent_prob() != 0.0:
+            return None
+        return self.opt.Eobjective(verbose=False)
+
+    def _try_average_scenario_xhat(self):
+        """One-shot helper for xhat spokes that opt in via
+        ``--*-try-jensens-first``. No-op when the flag is off.
+
+        When enabled, builds the average scenario, solves it, evaluates
+        its first-stage solution as a candidate xhat across all real
+        scenarios, and -- if every scenario is feasible at that xhat --
+        calls ``self.update_if_improving`` with the resulting expected
+        objective. If any scenario is infeasible, silently skips: the
+        spoke's normal main loop will keep trying other candidates.
+
+        Each xhat spoke's ``main()`` calls this helper exactly once, in
+        place of the inline four-line block, so the integer-recourse
+        tolerance, infeasibility skipping, and bound-update logic live
+        in one place.
+        """
+        if not self._jensens_enabled():
+            return
+        avg_scenario = self._jensens_build_avg()
+        _, nonant_values = self._jensens_solve(avg_scenario)
+        cache = self._jensens_pack_nonant_cache(nonant_values)
+        Eobj = self._jensens_evaluate_xhat(cache)
+        if Eobj is not None:
+            self.update_if_improving(Eobj)
