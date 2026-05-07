@@ -96,11 +96,31 @@ The flags actually exposed today, by group:
 - `--pickle-solver-name`, `--pickle-solver-options` —
   config.py:1256/1263, used for the iter0 solve done at pickle time
 
+**Mipgap schedule and automatic gapper (`Config.gapper_args()` at config.py:610):**
+
+These flags are registered separately from `add_solver_specs` /
+`add_mipgap_specs`, and the mipgap value they produce is written to
+the live options dict by the `Gapper` extension at runtime, not
+through `shared_options`/`apply_solver_specs`. See §1.5 item 9.
+
+| Flag                        | Type   | Default | Notes                                      |
+|-----------------------------|--------|---------|--------------------------------------------|
+| `--mipgaps-json`            | str    | None    | config.py:617. JSON file `{"<iter>": <gap>}` (global only — no per-spoke variant). |
+| `--starting-mipgap`         | float  | None    | config.py:622. Enables automatic-gapper mode. |
+| `--mipgap-ratio`            | float  | 0.1     | config.py:627. Ratio of overall opt gap to subproblem mipgap. |
+
+Per-spoke automatic-gapper variants exist (e.g. `--lagrangian-starting-mipgap`,
+`--lagrangian-mipgap-ratio`) via `gapper_args(name="lagrangian")`. Per-spoke
+*schedule* variants do not — the JSON schedule flag is registered only
+when the `name` argument is `None` (config.py:616).
+
 **Misc adjacent:**
 
 - `--stage2-ef-solver-name` — config.py:407, multistage xhat stage-2 EF.
 
-There is no global `--solver-options-file` flag and no JSON/YAML loader.
+There is no global `--solver-options-file` flag and no JSON/YAML loader
+for arbitrary solver options. The JSON support that does exist
+(`--mipgaps-json`) is mipgap-only.
 
 ### 1.2 String → dict parsing
 
@@ -230,6 +250,20 @@ on, and ideally fix:
    (spopt.py:193-194), and a Gurobi `LogFile` workaround when
    `--solver-log-dir` is used (spopt.py:215-217). No persistent-specific
    option translation.
+9. **The mipgap schedule lives in a parallel mechanism.** The
+   `--mipgaps-json` schedule and the automatic-gapper mode
+   (`--starting-mipgap` / `--mipgap-ratio`) are not handled by
+   `shared_options` / `apply_solver_specs` at all. Instead, the
+   `Gapper` extension (`mpisppy/extensions/mipgapper.py`) reads
+   `cfg.mipgaps_json` at config-build time (cfg_vanilla.py:393-411)
+   and at `pre_iter0` / `miditer` mutates the live options dict
+   directly: `self.ph.current_solver_options["mipgap"] = mipgap`
+   (mipgapper.py:46-52). Consequences: (a) the schedule wins against
+   anything `shared_options` set, because Gapper runs later in the
+   iteration; (b) per-spoke schedule files don't exist (only the
+   global flag is registered); (c) automatic-gapper mode is genuinely
+   adaptive — it reads the hub/spoke bound gap each iteration — so it
+   cannot be expressed as a static layer.
 
 ### 1.6 Representative current usage
 
@@ -356,6 +390,16 @@ DLW: File only. But the file will have to override iterk values or it won't make
 DLW: Open timeline. Just say that Lagranger will be deprecated in the future because it does not seem to
 work as well as other outer bound options.
 
+5. **Per-spoke `--mipgaps-json` variants.** Today only the global
+   `--mipgaps-json` flag is registered (config.py:616, gated on
+   `name is None`). The per-spoke automatic-gapper flags
+   (`--{name}-starting-mipgap`, `--{name}-mipgap-ratio`) exist, but
+   per-spoke schedule flags do not. Should the redesign add
+   `--{name}-mipgaps-json` for symmetry with the rest of the per-
+   spoke options surface? Adds one flag per Gapper-using spoke; trivial
+   to implement (drop the `name is None` gate at config.py:616 and
+   plumb in `add_gapper`).
+
 ## 5. Proposed design
 
 ### 5.1 One sentence
@@ -395,6 +439,12 @@ A method `PHBase._effective_solver_options(k: int) -> dict` walks
 `self.solver_options_layers` in order, picking layers whose predicate
 matches `k`, and returns the merged dict. This replaces the
 `current_solver_options` flip at `phbase.py:1052`.
+
+The existing `--mipgaps-json` schedule (§1.1, §5.7) folds naturally
+into this model: each `{"<N>": gap}` entry becomes a layer with the
+same predicates the layered system already has — `iter0` for `N=0`,
+`iterk` for `N=1`, `("after_iter", N)` for `N >= 2`. So the static
+schedule needs no new predicate; only the integration is new (§5.7).
 
 ### 5.3 New options-file
 
@@ -461,8 +511,10 @@ named a precise N.
 **Axis 2 — Source order, within a single predicate:**
 
 ```
-   options-file section
+   options-file section                       (general --solver-options-file)
       ≺  inline --solver-options              (default predicate only)
+      ≺  --mipgaps-json schedule entry        (mipgap-only, predicate
+                                               per entry; see §5.7)
       ≺  --iter0-mipgap / --iterk-mipgap /
          --max-solver-threads                 (CLI sugar; canonical
                                                keys mipgap, threads)
@@ -470,6 +522,14 @@ named a precise N.
 
 This is the "CLI overlays file" rule (§4 q1) — but it only breaks
 ties *within the same predicate*. Across predicates, axis 1 wins.
+
+`--mipgaps-json` sits above the general options-file because it is a
+mipgap-specific surface: a user who reaches for the schedule flag is
+expressing more intent about mipgap than someone who set a `mipgap`
+key inside the general options-file, and should override it. It sits
+below the dedicated `--iter0-mipgap` / `--iterk-mipgap` flags so a
+single CLI sugar still wins for the iteration it scopes — though in
+practice users rarely combine schedule + sugar for the same N.
 
 **Per-spoke layers** apply on top of the merged global dict. Within a
 spoke, axes 1 and 2 apply the same way, with `--{name}-solver-options`
@@ -562,7 +622,69 @@ already used to instantiate the solver plugin. If `solver_name` is
 `None` (shouldn't happen at solve time, but guard anyway), translation
 is a no-op.
 
-### 5.7 Lagranger deprecation
+### 5.7 Mipgap schedule and Gapper integration
+
+The redesign reuses the existing `--mipgaps-json` flag (registered in
+`Config.gapper_args()` at config.py:610) rather than introducing a new
+mipgap-schedule flag. The current Gapper machinery splits cleanly into
+two cases that get different treatment.
+
+**Static schedule (`--mipgaps-json` only):**
+
+At config-build time (`shared_options` / `apply_solver_specs`), parse
+the JSON file and append one layer per entry to
+`solver_options_layers`:
+
+| JSON key | Layer predicate         | Layer dict       |
+|----------|-------------------------|------------------|
+| `"0"`    | `iter0`                 | `{"mipgap": v}`  |
+| `"1"`    | `iterk`                 | `{"mipgap": v}`  |
+| `"N"` (N≥2) | `("after_iter", N)`  | `{"mipgap": v}`  |
+
+These layers enter axis 2 at the `--mipgaps-json` source level (§5.4),
+so they overlay any `mipgap` set in the general options-file, while
+single CLI sugar flags (`--iter0-mipgap`, `--iterk-mipgap`) still win
+for the iteration they scope. Axis 1 (specificity) handles N stacking.
+
+This *eliminates* the runtime mutation of `current_solver_options` at
+`mipgapper.py:46-52` for the static-schedule case: the schedule is a
+static configuration of layers, materialized once at startup, and
+`_effective_solver_options(k)` produces the right dict at every k
+without the Gapper extension being involved.
+
+**Automatic gapper (`--starting-mipgap` / `--mipgap-ratio`):**
+
+This mode is genuinely adaptive: at each `miditer`, the Gapper reads
+the hub/spoke bound gap (`compute_gaps()` at mipgapper.py:69) and sets
+mipgap to `problem_rel_gap * mipgap_ratio` if that's tighter than
+`starting_mipgap`. There is no static layer that can express this.
+
+Treatment: keep `Gapper` as a runtime extension, but rework
+`set_mipgap` to write into a designated *dynamic layer* on
+`PHBase.solver_options_layers` rather than mutating
+`current_solver_options`. Sketch:
+
+- At setup, PHBase reserves a layer slot at the very top of axis 2
+  (above all CLI sugar) tagged `dynamic_gapper`.
+- Gapper's `set_mipgap(g)` writes `{"mipgap": g}` into that layer's
+  options dict, scoped to predicate `("after_iter", k_now)` (or
+  simpler: `default`, since the dynamic value is meant to apply
+  immediately and persist until the next dynamic write).
+- `_effective_solver_options(k)` picks up the dynamic layer last, so
+  the adaptive gap wins over everything the user configured —
+  matching today's runtime-overwrite semantics.
+
+The `Config.gapper_args()` registration is unchanged; the `--mipgaps-
+json` flag and `--starting-mipgap` flag keep their current names and
+defaults (CLI compat).
+
+**Open issue (§4-style, recorded here for the implementer):** today
+there is no per-spoke `--{name}-mipgaps-json`; only the global flag
+exists (config.py:616). The redesign should add per-spoke variants
+for symmetry with `--{name}-starting-mipgap` and `--{name}-mipgap-
+ratio` — see §4 question 5.
+
+### 5.8 Lagranger deprecation
 
 Per §4 q4: emit a `DeprecationWarning` at `lagranger_spoke()` setup
 saying lagranger is slated for removal in a future release because it
@@ -572,7 +694,7 @@ No removal timeline committed in this redesign. Internal wiring is
 that's tracked separately and is conditional on whether lagranger
 survives at all.
 
-### 5.8 Component-level changes
+### 5.9 Component-level changes
 
 | File                                 | Change                                                                                                                                |
 |--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
@@ -582,9 +704,11 @@ survives at all.
 | `mpisppy/phbase.py`                  | Replace `iter0_solver_options` / `iterk_solver_options` / `current_solver_options` with `solver_options_layers` plus an `_effective_solver_options(k)` accessor. iter0/iterk attribute access supported via deprecated property shims that warn once and return the merged dict for that predicate.           |
 | `mpisppy/spopt.py`                   | In `solve_one`, ask the caller for an effective options dict (or compute it via `phbase` reference), then run it through `translate_solver_options(opts, self.options["solver_name"])` before the loop at `spopt.py:183-187`.                                                                                  |
 | `mpisppy/cylinders/lagranger.py`     | Emit `DeprecationWarning` at setup. No other change.                                                                                                                                                                                                                                                          |
+| `mpisppy/extensions/mipgapper.py`    | `set_mipgap` no longer reads or writes `self.ph.current_solver_options` (mipgapper.py:46-52 deleted). Instead, write to the reserved `dynamic_gapper` layer on `PHBase.solver_options_layers`. Static-schedule branch (mipgapper.py:78-84) is no longer needed once `--mipgaps-json` becomes static layers in `cfg_vanilla` — Gapper's `__init__` skips `mipgapdict` handling and only runs in automatic-gapper mode. See §5.7.   |
+| `mpisppy/utils/cfg_vanilla.py`       | (continued) `add_gapper` (cfg_vanilla.py:393) parses `--mipgaps-json` and appends one layer per JSON entry to `solver_options_layers`, instead of stuffing `mipgapdict` into `gapperoptions`. Automatic-mode flags continue to flow through `gapperoptions` for the runtime extension.                                                                                                                                          |
 | `mpisppy/utils/solver_spec.py`       | EF path: read the same `default` / `iter0` layers from the new file (EF treats `iter0` as applying — see §5.2). Translation runs the same way at solve time.                                                                                                                                                  |
 
-### 5.9 Programmatic API compatibility
+### 5.10 Programmatic API compatibility
 
 Examples like `examples/sslp/sslp.py:221` set
 `options["iter0_solver_options"]` and `options["iterk_solver_options"]`
@@ -593,7 +717,7 @@ on the input options dict, fold them into the layers list, and emit a
 single `DeprecationWarning` per run pointing at the new
 `solver_options_layers` shape. No removal in this round.
 
-### 5.10 Things deferred to §6
+### 5.11 Things deferred to §6
 
 §6 should enumerate every flag in §1.1 and confirm that under §5 it
 produces the same dict the solver plugin sees today, with the single
