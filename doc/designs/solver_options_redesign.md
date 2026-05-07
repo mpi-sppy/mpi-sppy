@@ -725,5 +725,181 @@ documented exception in §5.5 (per-spoke overlay vs replace).
 
 ## 6. Migration / compatibility plan
 
-*(to be drafted — must enumerate every flag in §1.1 and confirm its
- behavior under the new system.)*
+### 6.1 Per-flag compatibility audit
+
+Every CLI flag in §1.1, with the dict the solver plugin will see under
+the new design vs. today. "Compat" means the produced dict at solve
+time is identical to today's for any reasonable user invocation.
+
+| Flag                                          | Today                                                 | Under new design                                                                | Compat?            |
+|-----------------------------------------------|-------------------------------------------------------|---------------------------------------------------------------------------------|--------------------|
+| `--solver-name`                               | passed to `SolverFactory`                             | unchanged                                                                       | ✓                  |
+| `--solver-options "k=v ..."`                  | parsed once; copied to iter0 and iterk dicts          | parsed once; becomes a `default` layer                                          | ✓ (see §6.2 note 1)|
+| `--max-solver-threads`                        | written into iter0/iterk under `threads`              | `default` layer with `{threads: N}`; translated for the solver at solve time    | ✓                  |
+| `--solver-log-dir`                            | per-solve logfile path                                | unchanged plumbing                                                              | ✓                  |
+| `--iter0-mipgap`                              | iter0 dict `mipgap`                                   | `iter0` predicate layer with canonical `mipgap` key                             | ✓                  |
+| `--iterk-mipgap`                              | iterk dict `mipgap`                                   | `iterk` predicate layer with canonical `mipgap` key                             | ✓                  |
+| `--EF-solver-name`                            | EF path                                               | unchanged (translation runs same way)                                           | ✓                  |
+| `--EF-solver-options`                         | EF path; verbatim dict                                | parsed; applied to EF solve; canonical `mipgap`/`threads` translated            | ✓ (note 1)         |
+| `--EF-mipgap`                                 | EF path; `mipgap` key                                 | EF `default` layer (EF is a single solve)                                       | ✓                  |
+| `--{lagrangian,reduced-costs,subgradient,relaxed-ph,ph-dual,lagranger}-solver-name`           | per-spoke solver-plugin override                      | unchanged                                                                       | ✓                  |
+| `--{name}-solver-options`                     | replaces spoke iter0/iterk dict (cfg_vanilla.py:119-120) | overlays global merged dict                                                  | **CHANGED — §6.2** |
+| `--{name}-iter0-mipgap`, `--{name}-iterk-mipgap`                                                | per-spoke iter0/iterk `mipgap` key                    | per-spoke predicate layer                                                       | ✓                  |
+| `--obbt-solver-options`                       | OBBT presolve dict; single solve                      | parsed; applied to OBBT solve as a single dict                                  | ✓                  |
+| `--pickle-solver-name`, `--pickle-solver-options`                                              | pickle-time iter0 solve                               | unchanged plumbing (pickle path is its own thing)                               | ✓                  |
+| `--stage2-ef-solver-name`                     | multistage stage-2 EF                                 | unchanged                                                                       | ✓                  |
+| `--mipgaps-json`                              | runtime mutation by Gapper                            | static layers from JSON, materialized at config-build time (§5.7); Gapper no longer mutates for this case | ✓ (semantically identical for static schedules) |
+| `--starting-mipgap`, `--mipgap-ratio`         | runtime adaptive mutation by Gapper                   | unchanged behavior; Gapper writes to a reserved `dynamic_gapper` layer instead of `current_solver_options` | ✓ |
+| `--{name}-starting-mipgap`, `--{name}-mipgap-ratio`                                            | per-spoke adaptive                                    | unchanged                                                                       | ✓                  |
+
+**Note 1 (translation effects).** For `--solver-options` /
+`--EF-solver-options`, keys other than `mipgap` and `threads` pass
+through verbatim, exactly as today. For `mipgap` and `threads`, the
+key written into `s._solver_plugin.options` after translation may
+differ from today *only when the user wrote the canonical key
+(`mipgap`) for a solver whose actual key differs (e.g. HiGHS
+`mip_rel_gap`)*. In that case, today the user's call to HiGHS with
+`--solver-options "mipgap=0.01"` was silently ignored; under the new
+design, `0.01` actually takes effect. This is a fix, not a
+regression, but it could surface differently in tests that compared
+solver behavior.
+
+### 6.2 The one user-visible behavior change
+
+`apply_solver_specs` switches from replace to overlay (§5.5).
+Concretely:
+
+```
+--solver-options "logfile=run.log threads=4"
+--lagrangian-solver-options "mipgap=0.01"
+```
+
+| Lagrangian-spoke effective dict | Today (replace)        | New (overlay)                         |
+|---------------------------------|------------------------|---------------------------------------|
+| `mipgap`                        | 0.01                   | 0.01                                  |
+| `threads`                       | (only if `--max-solver-threads`) | 4                           |
+| `logfile`                       | not set                | `run.log`                             |
+
+The new dict is a *superset* of the old one in every case where the
+spoke flag's parsed dict is a subset of the global flag's parsed dict,
+which is the common pattern in existing scripts (spoke flag tightens
+mipgap, leaves the rest alone). Users who relied on the spoke flag
+*dropping* a global key recover that by re-spelling the spoke options
+to include the keys they want, or by leaving the global flag unset.
+
+Action items:
+
+- Release notes call-out under "Behavior changes."
+- Add an integration test asserting the new merge semantics (so a
+  future regression to replace-style would fail CI).
+- Audit `examples/` for any harness whose semantics actually depend
+  on replace-style. (Quick grep so far: no obvious cases — the
+  examples that pass `--{name}-solver-options` use it for tightening
+  mipgap.)
+
+### 6.3 Programmatic-API migration
+
+| Surface                                                  | Today                              | New                                                                               | Removal       |
+|----------------------------------------------------------|-------------------------------------|----------------------------------------------------------------------------------|---------------|
+| `options["iter0_solver_options"]`, `options["iterk_solver_options"]` (input to PHBase) | active            | accepted; folded into `solver_options_layers`; one `DeprecationWarning` per run  | future, TBD   |
+| `PHBase.iter0_solver_options`, `iterk_solver_options`, `current_solver_options` (attribute reads) | active            | property shims that compute the merged dict for that predicate; warn on first access per run | future, TBD |
+| `option_string_to_dict`                                  | active                              | unchanged                                                                         | n/a           |
+| `option_dict_to_string`                                  | active                              | unchanged                                                                         | n/a           |
+
+Deprecation timelines are deliberately not committed in this redesign;
+they get set when we do a separate cleanup pass on examples and
+external callers. `examples/sslp/sslp.py:221` is the canonical caller
+that will need migration.
+
+### 6.4 Phased rollout
+
+The redesign is large enough that it should land in review-sized
+phases, each independently testable. Suggested order — each phase is
+green-on-its-own:
+
+1. **Layer data model (no behavior change).** Add
+   `solver_options_layers` to `PHBase` alongside the existing
+   `iter0_solver_options` / `iterk_solver_options` attributes.
+   `shared_options` and `apply_solver_specs` build the list *and*
+   keep populating the iter0/iterk dicts. Internal consumers
+   continue to read iter0/iterk; layer list is dormant.
+2. **Switch consumption to layers.** `solve_loop` /
+   `_effective_solver_options(k)` reads from layers; iter0/iterk
+   dicts become derived properties (no warning yet). Existing tests
+   pass unchanged.
+3. **Solver-name-aware translation.** Add `translate_solver_options`
+   helper; wire into `solve_one` before the options-write loop
+   (`spopt.py:183-187`). Add the canonical-key table.
+4. **Per-spoke overlay semantics.** Switch `apply_solver_specs` from
+   replace to overlay (§5.5 / §6.2). The one user-visible behavior
+   change. Add a test asserting overlay.
+5. **Mipgap schedule integration.** `add_gapper` parses
+   `--mipgaps-json` into static layers. `Gapper.set_mipgap` writes to
+   the `dynamic_gapper` layer instead of mutating
+   `current_solver_options`. Static-schedule branch in `mipgapper.py`
+   becomes dead code.
+6. **New options-file.** Register `--solver-options-file` (and per-
+   spoke variants); add `load_solver_options_file`; plumb file layers
+   in `shared_options` / `apply_solver_specs`.
+7. **Lagranger deprecation warning** (§5.8). Single-line addition.
+8. **Programmatic-API deprecation warnings** (§6.3). Final phase
+   because it touches user code paths and can be done cleanly only
+   once the new shape is stable.
+
+Phases 1–2 land internally with no surface change. Phase 4 is the only
+phase with a release-notes-worthy behavior change. Phases 6 and 7 add
+new surface (new flag, new warning); phases 3 and 5 add new behavior
+that improves on quietly-broken cases.
+
+### 6.5 Test coverage
+
+Per memory rule: any new `mpisppy/tests/test_*.py` file added in this
+redesign must be wired into both `run_coverage.bash` and
+`.github/workflows/test_pr_and_main.yml` in the same commit, or
+codecov/patch reports 0%.
+
+New unit tests:
+
+- `test_solver_options_layers.py`: predicate matching, ordering,
+  `_effective_solver_options(k)` for representative `k`. Covers
+  axis-1 and axis-2 cases of §5.4 individually.
+- `test_solver_options_translation.py`: round-trip mipgap/threads
+  across each known `solver_name` in the canonical table.
+- `test_solver_options_file.py`: schema acceptance, malformed JSON,
+  per-spoke nesting, `after_iter` int-coercion.
+
+New integration tests (added to existing test files where natural):
+
+- `--solver-options "..." --solver-options-file path.json` together:
+  inline overlays file (§5.4 axis 2).
+- `--solver-options "logfile=run.log" --lagrangian-solver-options
+  "mipgap=0.01"` produces overlay (§6.2).
+- `--mipgaps-json {"5": 1e-5} --iterk-mipgap 0.001`: at k=3, mipgap
+  is 0.001; at k=7, mipgap is 1e-5 (§5.4 worked example, executed).
+
+Existing tests to keep green without modification:
+
+- `mpisppy/tests/test_ef_ph.py` (Gapper tests at 513, 535).
+- `mpisppy/tests/test_ph_extensions.py` (Gapper tests at 58, 81 —
+  programmatic `gapperoptions` dict).
+
+### 6.6 Documentation
+
+- One new RST page under `doc/src/` covering solver-options surface
+  end-to-end: CLI flags, options-file schema, mipgap schedule,
+  per-spoke overrides, translation table. Replaces whatever scattered
+  notes exist today.
+- `CHANGELOG` entry under "Behavior changes" pointing at §6.2.
+- `CHANGELOG` entry under "New features" for `--solver-options-file`,
+  per-spoke variants, and `--{name}-mipgaps-json` if §4 q5 lands.
+
+### 6.7 Things this plan does *not* do
+
+- Does not commit deprecation-removal timelines for any of the
+  warning-only items (§5.8 lagranger, §5.10 programmatic-API). Those
+  are tracked separately.
+- Does not refactor lagranger's internal wiring beyond emitting the
+  `DeprecationWarning` (§5.8). If lagranger is removed entirely
+  before the wiring needs touching, the refactor is moot.
+- Does not introduce CLI flags for individual non-mipgap-non-thread
+  options (§3 non-goal).
