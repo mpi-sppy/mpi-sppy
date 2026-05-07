@@ -434,35 +434,82 @@ A new helper `mpisppy.utils.sputils.load_solver_options_file(path) ->
 list[SolverOptionsLayer]` reads the file and returns the layer list
 (global section); a sibling helper extracts the per-spoke sublayers.
 
-### 5.4 Merge precedence (lowest → highest)
+### 5.4 Merge precedence (two-axis rule)
 
-Every level below overlays the level above (last write wins per key).
-This is a *flat* dict union at each step (per §4 question 2).
+Folding all the layers into one effective dict for iteration `k` is a
+*flat* dict union (per §4 q2 — last write wins per key), but the
+*order* in which layers fold is governed by two axes, applied in
+order:
 
-Global stack:
+**Axis 1 — Predicate specificity (most-general first; most-specific
+last, so most-specific wins):**
 
-1. Options-file `default` section
-2. Inline `--solver-options "k=v ..."` (parsed by today's
-   `option_string_to_dict`; behaves as a `default` layer)
-3. Options-file `iter0` / `iterk` / `after_iter` sections (each is a
-   predicate-scoped layer; `after_iter:N` layers stack in order of N)
-4. CLI `--iter0-mipgap` / `--iterk-mipgap` / `--max-solver-threads`
-   (predicate-scoped sugar — `iter0`, `iterk`, and `default`
-   respectively, with the canonical key `mipgap` or `threads`)
+```
+   default
+      ≺  iter0       (only at k = 0)
+      ≺  iterk       (k ≥ 1)
+              ≺  after_iter:N₁    (k ≥ N₁)
+              ≺  after_iter:N₂    (k ≥ N₂, N₁ < N₂)
+              ≺  ...              (sorted by ascending N)
+```
 
-Per-spoke stack (only if the spoke opts in via `apply_solver_specs`):
+`iter0` and `iterk` are disjoint, so the comparison only matters for
+predicates that all match the current `k`. `after_iter:N` is strictly
+more specific than `iterk` whenever it matches, because the user
+named a precise N.
 
-5. Per-spoke options-file section: `default`, then `iter0` / `iterk` /
-   `after_iter` overlays (same shape as global, applied after global)
-6. Per-spoke inline `--{name}-solver-options` (overlays as `default`)
-7. Per-spoke `--{name}-iter0-mipgap` / `--{name}-iterk-mipgap`
+**Axis 2 — Source order, within a single predicate:**
 
-Solver-name-aware translation (§5.6) is applied to the final merged
+```
+   options-file section
+      ≺  inline --solver-options              (default predicate only)
+      ≺  --iter0-mipgap / --iterk-mipgap /
+         --max-solver-threads                 (CLI sugar; canonical
+                                               keys mipgap, threads)
+```
+
+This is the "CLI overlays file" rule (§4 q1) — but it only breaks
+ties *within the same predicate*. Across predicates, axis 1 wins.
+
+**Per-spoke layers** apply on top of the merged global dict. Within a
+spoke, axes 1 and 2 apply the same way, with `--{name}-solver-options`
+and `--{name}-iter0-mipgap`/`--{name}-iterk-mipgap` taking the CLI-
+sugar role:
+
+```
+  global merged dict
+      ≺  spoke options-file section (axis-1 ordered)
+      ≺  spoke --{name}-solver-options        (default predicate)
+      ≺  spoke --{name}-iter0-mipgap /
+         --{name}-iterk-mipgap                (predicate-scoped)
+```
+
+Worked example — the case that motivated this rule:
+
+```
+CLI:  --iterk-mipgap=0.001
+file: { "after_iter": { "5": { "mipgap": 1e-5 } } }
+```
+
+| k | predicates that match    | folded order (axis 1, then 2)                  | result mipgap |
+|---|--------------------------|------------------------------------------------|---------------|
+| 0 | `iter0`                  | (no `iter0` writer here) → unset               | unset         |
+| 3 | `iterk`                  | CLI `--iterk-mipgap`                           | `0.001`       |
+| 7 | `iterk`, `after_iter:5`  | CLI `--iterk-mipgap`, then file `after_iter:5` | `1e-5`        |
+
+The CLI's `--iterk-mipgap` writes first (axis 1 puts `iterk` before
+`after_iter:N`), then the file's `after_iter:5` overwrites it because
+it is strictly more specific. CLI does not "win" against a more
+specific predicate — only against a same-predicate file entry.
+
+A natural consequence: if both file and CLI set the *same* key with
+the *same* predicate, CLI wins (axis 2). If file sets a key with a
+*more specific* predicate that matches, file wins (axis 1). This
+matches the §4 q3 follow-up — yes, file's `after_iter:N` overrides
+both file `iterk` and CLI `--iterk-mipgap` for `k ≥ N`.
+
+Solver-name-aware translation (§5.6) is applied to the final folded
 dict, not at any intermediate layer.
-
-This codifies the §4 answers: CLI overlays file (DLW q1), flat union
-(DLW q2), and `after_iter:N` overrides `iterk` for `k >= N` because
-`after_iter` layers come *later* in the stack (DLW q3 follow-up: yes).
 
 ### 5.5 Per-spoke override semantics — behavior change
 
