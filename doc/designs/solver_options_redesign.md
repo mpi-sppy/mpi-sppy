@@ -358,7 +358,199 @@ work as well as other outer bound options.
 
 ## 5. Proposed design
 
-*(to be drafted)*
+### 5.1 One sentence
+
+Replace the `(iter0_solver_options, iterk_solver_options)` pair with an
+ordered list of *predicate-scoped overlays*, fed by a new JSON
+options-file plus all of today's CLI flags, merged by flat dict union,
+and translated for `mipgap` / `threads` only at the last moment before
+the values reach the Pyomo solver plugin.
+
+### 5.2 Internal data model: layered overlays
+
+A solve's effective options are produced by walking a list of layers
+in order and folding each into a running dict (last write wins per
+key, flat dict union). Each layer has a *predicate* (when does this
+layer apply) and an *options dict* (what to write).
+
+```python
+SolverOptionsLayer = TypedDict("SolverOptionsLayer", {
+    "when": Predicate,   # see below
+    "options": dict[str, Any],
+})
+
+# Predicates:
+#   "default"                — always
+#   "iter0"                  — iteration 0 only
+#   "iterk"                  — iterations k >= 1
+#   ("after_iter", N: int)   — iterations k >= N
+```
+
+`iterk` is sugar for `("after_iter", 1)` and is kept as a separate
+predicate solely for compatibility with `--iterk-mipgap`. EF and other
+non-iterating solves treat every layer with `when in {"default",
+"iter0"}` as applying, and ignore `iterk` / `after_iter` layers.
+
+A method `PHBase._effective_solver_options(k: int) -> dict` walks
+`self.solver_options_layers` in order, picking layers whose predicate
+matches `k`, and returns the merged dict. This replaces the
+`current_solver_options` flip at `phbase.py:1052`.
+
+### 5.3 New options-file
+
+CLI: `--solver-options-file <path>` — registered alongside
+`--solver-options` in `Config.add_solver_specs()`, so each per-spoke
+prefix automatically gets `--{name}-solver-options-file` too. Format
+is JSON for v1 (stdlib only — no `pyyaml` dependency to add). YAML can
+be added later as an alias if there's demand; this is not a v1 commit.
+
+Schema (by example):
+
+```json
+{
+  "default":   {"threads": 4, "logfile": "run.log"},
+  "iter0":     {"mipgap": 1e-4},
+  "iterk":     {"mipgap": 1e-3},
+  "after_iter": {
+    "5":  {"mipgap": 1e-5},
+    "10": {"mipgap": 1e-6}
+  },
+  "spokes": {
+    "lagrangian": {
+      "default": {"mipgap": 0.01}
+    },
+    "reduced_costs": {
+      "iter0": {"mipgap": 0.001}
+    }
+  }
+}
+```
+
+`after_iter` keys are JSON strings (since JSON object keys must be
+strings); they are coerced to ints at load time. Per-spoke sub-blocks
+mirror the top-level shape.
+
+A new helper `mpisppy.utils.sputils.load_solver_options_file(path) ->
+list[SolverOptionsLayer]` reads the file and returns the layer list
+(global section); a sibling helper extracts the per-spoke sublayers.
+
+### 5.4 Merge precedence (lowest → highest)
+
+Every level below overlays the level above (last write wins per key).
+This is a *flat* dict union at each step (per §4 question 2).
+
+Global stack:
+
+1. Options-file `default` section
+2. Inline `--solver-options "k=v ..."` (parsed by today's
+   `option_string_to_dict`; behaves as a `default` layer)
+3. Options-file `iter0` / `iterk` / `after_iter` sections (each is a
+   predicate-scoped layer; `after_iter:N` layers stack in order of N)
+4. CLI `--iter0-mipgap` / `--iterk-mipgap` / `--max-solver-threads`
+   (predicate-scoped sugar — `iter0`, `iterk`, and `default`
+   respectively, with the canonical key `mipgap` or `threads`)
+
+Per-spoke stack (only if the spoke opts in via `apply_solver_specs`):
+
+5. Per-spoke options-file section: `default`, then `iter0` / `iterk` /
+   `after_iter` overlays (same shape as global, applied after global)
+6. Per-spoke inline `--{name}-solver-options` (overlays as `default`)
+7. Per-spoke `--{name}-iter0-mipgap` / `--{name}-iterk-mipgap`
+
+Solver-name-aware translation (§5.6) is applied to the final merged
+dict, not at any intermediate layer.
+
+This codifies the §4 answers: CLI overlays file (DLW q1), flat union
+(DLW q2), and `after_iter:N` overrides `iterk` for `k >= N` because
+`after_iter` layers come *later* in the stack (DLW q3 follow-up: yes).
+
+### 5.5 Per-spoke override semantics — behavior change
+
+Today, `apply_solver_specs(name, spoke, cfg)` *replaces* a spoke's
+iter0/iterk dict wholesale when `--{name}-solver-options` is given
+(cfg_vanilla.py:119–120). Under the new model, per-spoke options are
+overlays on top of the global merged dict. A user who depended on the
+old replace-behavior recovers it by re-spelling every key they want;
+since merge is strictly more general, this is a backward-compatible
+behavior *broadening*, not a contraction.
+
+This is the only user-visible behavior change for existing CLI
+invocations. It must be called out in §6 (migration plan) and in the
+release notes.
+
+### 5.6 Solver-name-aware translation
+
+A new helper in `mpisppy/utils/sputils.py`:
+
+```python
+def translate_solver_options(opts: dict, solver_name: str) -> dict:
+    """Return a copy of opts with mipgap/threads renamed to the
+    solver's actual key, where it differs from mpi-sppy's canonical
+    key. Other keys are passed through unchanged."""
+```
+
+Translation table (initial proposal — verify before implementing):
+
+| Canonical | cplex / cplex_persistent | gurobi / gurobi_persistent | xpress / xpress_persistent | highs / appsi_highs |
+|-----------|--------------------------|----------------------------|----------------------------|---------------------|
+| `mipgap`  | `mipgap`                 | `mipgap`                   | `mipgap`                   | `mip_rel_gap`       |
+| `threads` | `threads`                | `Threads`                  | `threads`                  | `threads`           |
+
+Collision rule: if both the canonical key (`mipgap`) and the
+solver-specific key (`mip_rel_gap`) are present in the merged dict —
+e.g. because the user wrote `mip_rel_gap` directly in
+`--solver-options` *and* also passed `--iter0-mipgap` — the
+solver-specific key wins (translation does not overwrite an existing
+value at the destination key). The user explicitly named the
+solver-specific key, so respect that intent.
+
+Translation runs at the latest possible moment: inside `solve_one`,
+just before the `for option_key,option_value in solver_options.items()`
+loop at `spopt.py:183-187`. Stored options on `PHBase` always use the
+canonical names, so a single layered structure is solver-agnostic
+until the solver is actually known.
+
+Solver name comes from `self.options["solver_name"]`, which is what's
+already used to instantiate the solver plugin. If `solver_name` is
+`None` (shouldn't happen at solve time, but guard anyway), translation
+is a no-op.
+
+### 5.7 Lagranger deprecation
+
+Per §4 q4: emit a `DeprecationWarning` at `lagranger_spoke()` setup
+saying lagranger is slated for removal in a future release because it
+does not seem to perform as well as the other outer-bound options.
+No removal timeline committed in this redesign. Internal wiring is
+*not* refactored to fold into `apply_solver_specs` in this round —
+that's tracked separately and is conditional on whether lagranger
+survives at all.
+
+### 5.8 Component-level changes
+
+| File                                 | Change                                                                                                                                |
+|--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| `mpisppy/utils/sputils.py`           | + `load_solver_options_file(path)`, `translate_solver_options(opts, solver_name)`, `_canonical_solver_options_table` constant. `option_string_to_dict` unchanged. |
+| `mpisppy/utils/config.py`            | `add_solver_specs(prefix)` also registers `{prefix_}solver_options_file` (str, default None). All existing flags keep the same names, types, and defaults.        |
+| `mpisppy/utils/cfg_vanilla.py`       | `shared_options` outputs `solver_options_layers` (a list) instead of (or in addition to) `iter0_solver_options` / `iterk_solver_options`. `apply_solver_specs` overlays per-spoke layers rather than replacing dicts. Reapplication of `max_solver_threads` becomes a `default` layer at the top of the global stack. |
+| `mpisppy/phbase.py`                  | Replace `iter0_solver_options` / `iterk_solver_options` / `current_solver_options` with `solver_options_layers` plus an `_effective_solver_options(k)` accessor. iter0/iterk attribute access supported via deprecated property shims that warn once and return the merged dict for that predicate.           |
+| `mpisppy/spopt.py`                   | In `solve_one`, ask the caller for an effective options dict (or compute it via `phbase` reference), then run it through `translate_solver_options(opts, self.options["solver_name"])` before the loop at `spopt.py:183-187`.                                                                                  |
+| `mpisppy/cylinders/lagranger.py`     | Emit `DeprecationWarning` at setup. No other change.                                                                                                                                                                                                                                                          |
+| `mpisppy/utils/solver_spec.py`       | EF path: read the same `default` / `iter0` layers from the new file (EF treats `iter0` as applying — see §5.2). Translation runs the same way at solve time.                                                                                                                                                  |
+
+### 5.9 Programmatic API compatibility
+
+Examples like `examples/sslp/sslp.py:221` set
+`options["iter0_solver_options"]` and `options["iterk_solver_options"]`
+directly, bypassing `cfg_vanilla`. PHBase will still accept these keys
+on the input options dict, fold them into the layers list, and emit a
+single `DeprecationWarning` per run pointing at the new
+`solver_options_layers` shape. No removal in this round.
+
+### 5.10 Things deferred to §6
+
+§6 should enumerate every flag in §1.1 and confirm that under §5 it
+produces the same dict the solver plugin sees today, with the single
+documented exception in §5.5 (per-spoke overlay vs replace).
 
 ## 6. Migration / compatibility plan
 
