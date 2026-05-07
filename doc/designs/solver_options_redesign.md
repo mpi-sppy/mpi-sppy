@@ -27,11 +27,17 @@ In scope:
   per-iteration solve calls.
 - How EF, PH iter0, PH iterk, and per-spoke overrides interact.
 
-Out of scope (for now):
+Also in scope, with caveat:
 
 - Auto-translating option names across solvers (e.g. `mipgap` for
-  CPLEX/Gurobi vs `mip_rel_gap` for HiGHS). The current code does not do
-  this; whether the redesign should is an open question (§4).
+  CPLEX/Gurobi vs `mip_rel_gap` for HiGHS) — but **only for `mipgap`
+  and `threads`**. The current code does not translate at all. See
+  §2 goal #4 and §3 non-goal on other keys.
+
+Out of scope:
+
+- Auto-translation for any option key other than `mipgap` and
+  `threads`.
 - Solver-pool / solver-per-rank dispatch.
 
 ---
@@ -322,10 +328,15 @@ remains:
    are both supplied, who wins? Proposal to discuss: file is the base,
    inline string overlays. (CLI overlays file feels right because the
    inline string is the more "immediate" surface.)
+DLW: CLI overlays
+
+
 2. **Spoke-override merge depth.** Flat dict union, or anything more
    structured? Today's surface is flat (`{key: value}`), so a flat
    union is the minimum-change implementation. Anything richer would
    only matter if we add nested per-iteration sub-dicts (see #3).
+DLW: flat union makes sense
+
 3. **"After-iteration-N" surface.** How does the user specify N? Two
    sketches:
    - Generalize the current pattern: a flag `--after-iter-N-mipgap`
@@ -334,12 +345,16 @@ remains:
      `{"after_iter": {"5": {"mipgap": 1e-3}}}`.
    File-only keeps the CLI surface flat and avoids inventing many new
    flags. Probably the right call if the file format lands first.
+DLW: File only. But the file will have to override iterk values or it won't make sense, right?
+
 4. **Lagranger deprecation specifics.** Direction agreed: lagranger's
    custom iter0/iterk handling is deprecated; it routes through the
    same path as siblings, emits a `DeprecationWarning`, and raises if
    a user passes a combination the unified path cannot honor.
    Backward compatibility on the internal wiring is not required.
    Open: warning message text and removal timeline.
+DLW: Open timeline. Just say that Lagranger will be deprecated in the future because it does not seem to
+work as well as other outer bound options.
 
 ## 5. Proposed design
 
