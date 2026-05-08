@@ -62,6 +62,11 @@ def shared_options(cfg):
         "display_convergence_detail": cfg.display_convergence_detail,
         "iter0_solver_options": dict(),
         "iterk_solver_options": dict(),
+        # Phase-1 groundwork (see doc/designs/solver_options_redesign.md
+        # §5.2 / §6.4). The layer list is built in parallel with the
+        # legacy iter0/iterk dicts and folds to the same values; no
+        # consumer reads from it yet.
+        "solver_options_layers": [],
         "tee-rank0-solves": cfg.tee_rank0_solves,
         "trace_prefix" : cfg.trace_prefix,
         "presolve" : cfg.presolve,
@@ -79,14 +84,25 @@ def shared_options(cfg):
         odict = sputils.option_string_to_dict(cfg.solver_options)
         shoptions["iter0_solver_options"] = odict
         shoptions["iterk_solver_options"] = copy.deepcopy(odict)
-    # note that specific options usch as mipgap will override        
+        shoptions["solver_options_layers"].append(
+            sputils.solver_options_layer("default", odict))
+    # note that specific options usch as mipgap will override
     if _hasit(cfg, "max_solver_threads"):
         shoptions["iter0_solver_options"]["threads"] = cfg.max_solver_threads
         shoptions["iterk_solver_options"]["threads"] = cfg.max_solver_threads
+        shoptions["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "default", {"threads": cfg.max_solver_threads}))
     if _hasit(cfg, "iter0_mipgap"):
         shoptions["iter0_solver_options"]["mipgap"] = cfg.iter0_mipgap
+        shoptions["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "iter0", {"mipgap": cfg.iter0_mipgap}))
     if _hasit(cfg, "iterk_mipgap"):
         shoptions["iterk_solver_options"]["mipgap"] = cfg.iterk_mipgap
+        shoptions["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "iterk", {"mipgap": cfg.iterk_mipgap}))
     if _hasit(cfg, "reduced_costs"):
         shoptions["rc_bound_tol"] = cfg.rc_bound_tol
     if _hasit(cfg, "solver_log_dir"):
@@ -112,21 +128,39 @@ def shared_options(cfg):
 
 def apply_solver_specs(name, spoke, cfg):
     options = spoke["opt_kwargs"]["options"]
+    # Phase-1 groundwork: keep the legacy iter0/iterk dict mutations and
+    # mirror them onto solver_options_layers (§5.2 / §6.4 phase 1).
+    # Layer list is dormant; no consumer reads it yet. Phase 5 will
+    # change replace-style to overlay; phase 1 keeps the legacy contract.
+    options.setdefault("solver_options_layers", [])
     if _hasit(cfg, name+"_solver_name"):
         options["solver_name"] = cfg.get(name+"_solver_name")
     if _hasit(cfg, name+"_solver_options"):
         odict = sputils.option_string_to_dict(cfg.get(name+"_solver_options"))
         options["iter0_solver_options"] = odict
         options["iterk_solver_options"] = copy.deepcopy(odict)
+        # Mirror replace semantics for layers.
+        options["solver_options_layers"] = [
+            sputils.solver_options_layer("default", odict)
+        ]
     if _hasit(cfg, name+"_iter0_mipgap"):
         options["iter0_solver_options"]["mipgap"] = cfg.get(name+"_iter0_mipgap")
+        options["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "iter0", {"mipgap": cfg.get(name+"_iter0_mipgap")}))
     if _hasit(cfg, name+"_iterk_mipgap"):
         options["iterk_solver_options"]["mipgap"] = cfg.get(name+"_iterk_mipgap")
+        options["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "iterk", {"mipgap": cfg.get(name+"_iterk_mipgap")}))
     # re-apply max_solver_threads since we may have over-written the
     # iter*_solver_options above.
     if _hasit(cfg, "max_solver_threads"):
         options["iter0_solver_options"]["threads"] = cfg.max_solver_threads
         options["iterk_solver_options"]["threads"] = cfg.max_solver_threads
+        options["solver_options_layers"].append(
+            sputils.solver_options_layer(
+                "default", {"threads": cfg.max_solver_threads}))
 
 def add_multistage_options(cylinder_dict,all_nodenames,branching_factors):
     cylinder_dict = copy.deepcopy(cylinder_dict)
