@@ -61,6 +61,9 @@ run_phase "test_ef_ph (serial)" \
 run_phase "test_component_map_usage (serial)" \
     coverage run --rcfile=.coveragerc -m pytest mpisppy/tests/test_component_map_usage.py -v
 
+run_phase "test_solver_options_layers (serial)" \
+    coverage run --rcfile=.coveragerc -m pytest mpisppy/tests/test_solver_options_layers.py -v
+
 run_phase "test_nonant_validation (serial)" \
     coverage run --rcfile=.coveragerc -m pytest mpisppy/tests/test_nonant_validation.py -v
 
