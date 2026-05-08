@@ -399,6 +399,9 @@ work as well as other outer bound options.
    spoke options surface? Adds one flag per Gapper-using spoke; trivial
    to implement (drop the `name is None` gate at config.py:616 and
    plumb in `add_gapper`).
+DLW: yes, let's do it. Resolved — incorporated into §5.7 and the
+phase-5 work in §6.4. `Config.gapper_args(name)` registers
+`--{name}-mipgaps-json` for every per-spoke prefix it is called with.
 
 ## 5. Proposed design
 
@@ -678,11 +681,12 @@ The `Config.gapper_args()` registration is unchanged; the `--mipgaps-
 json` flag and `--starting-mipgap` flag keep their current names and
 defaults (CLI compat).
 
-**Open issue (§4-style, recorded here for the implementer):** today
-there is no per-spoke `--{name}-mipgaps-json`; only the global flag
-exists (config.py:616). The redesign should add per-spoke variants
-for symmetry with `--{name}-starting-mipgap` and `--{name}-mipgap-
-ratio` — see §4 question 5.
+**Per-spoke schedule flags (resolved per §4 q5).** Add
+`--{name}-mipgaps-json` for each Gapper-using spoke prefix, by removing
+the `name is None` gate at config.py:616 inside `Config.gapper_args()`.
+`add_gapper` (cfg_vanilla.py:393) reads the per-spoke flag the same way
+it reads the global one and contributes per-spoke layers to the
+spoke's section of `solver_options_layers`.
 
 ### 5.8 Lagranger deprecation
 
@@ -817,12 +821,15 @@ The redesign is large enough that it should land in review-sized
 phases, each independently testable. Suggested order — each phase is
 green-on-its-own:
 
-1. **Layer data model (no behavior change).** Add
-   `solver_options_layers` to `PHBase` alongside the existing
+1. **Layer data model (no behavior change) + this design document.**
+   Add `solver_options_layers` to `PHBase` alongside the existing
    `iter0_solver_options` / `iterk_solver_options` attributes.
    `shared_options` and `apply_solver_specs` build the list *and*
    keep populating the iter0/iterk dicts. Internal consumers
-   continue to read iter0/iterk; layer list is dormant.
+   continue to read iter0/iterk; layer list is dormant. This
+   document (`doc/designs/solver_options_redesign.md`) ships in the
+   same PR so reviewers have the full context for the data-model
+   choices.
 2. **Switch consumption to layers.** `solve_loop` /
    `_effective_solver_options(k)` reads from layers; iter0/iterk
    dicts become derived properties (no warning yet). Existing tests
@@ -891,7 +898,8 @@ Existing tests to keep green without modification:
   notes exist today.
 - `CHANGELOG` entry under "Behavior changes" pointing at §6.2.
 - `CHANGELOG` entry under "New features" for `--solver-options-file`,
-  per-spoke variants, and `--{name}-mipgaps-json` if §4 q5 lands.
+  per-spoke variants, and the per-spoke `--{name}-mipgaps-json` flags
+  resolved in §4 q5.
 
 ### 6.7 Things this plan does *not* do
 
