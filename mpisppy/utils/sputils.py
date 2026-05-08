@@ -721,6 +721,20 @@ def option_dict_to_string(odict):
 #   ("after_iter", N)     — iterations k >= N (N is int)
 
 
+def _validate_when(when):
+    """Raise ValueError if *when* is not a recognized layer predicate."""
+    if when in ("default", "iter0", "iterk"):
+        return
+    if isinstance(when, tuple) and len(when) == 2 and when[0] == "after_iter":
+        N = when[1]
+        # bool is a subclass of int; reject it explicitly
+        if isinstance(N, bool) or not isinstance(N, int) or N < 0:
+            raise ValueError(
+                f"after_iter predicate requires a non-negative int, got {N!r}")
+        return
+    raise ValueError(f"Unknown solver-options layer predicate: {when!r}")
+
+
 def solver_options_layer(when, options):
     """Build a single solver-options layer.
 
@@ -732,19 +746,20 @@ def solver_options_layer(when, options):
     Returns:
         dict with keys "when" and "options".
     """
+    _validate_when(when)
     return {"when": when, "options": dict(options)}
 
 
 def _layer_matches(when, k):
+    _validate_when(when)
     if when == "default":
         return True
     if when == "iter0":
         return k == 0
     if when == "iterk":
         return k >= 1
-    if isinstance(when, tuple) and len(when) == 2 and when[0] == "after_iter":
-        return k >= when[1]
-    raise ValueError(f"Unknown solver-options layer predicate: {when!r}")
+    # only ("after_iter", N) remains, validated above
+    return k >= when[1]
 
 
 def fold_solver_options_layers(layers, k):

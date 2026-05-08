@@ -19,7 +19,10 @@ import unittest
 
 from mpisppy.utils import config
 from mpisppy.utils.cfg_vanilla import shared_options, apply_solver_specs
-from mpisppy.utils.sputils import fold_solver_options_layers
+from mpisppy.utils.sputils import (
+    fold_solver_options_layers,
+    solver_options_layer,
+)
 
 
 def _bare_cfg():
@@ -175,6 +178,40 @@ class TestApplySolverSpecsLayers(unittest.TestCase):
             fold_solver_options_layers(opts["solver_options_layers"], 1),
             opts["iterk_solver_options"],
         )
+
+
+class TestPredicateValidation(unittest.TestCase):
+
+    def test_valid_predicates_accepted(self):
+        for when in ("default", "iter0", "iterk",
+                     ("after_iter", 0), ("after_iter", 5)):
+            solver_options_layer(when, {"mipgap": 0.01})
+
+    def test_unknown_string_predicate_rejected(self):
+        with self.assertRaises(ValueError):
+            solver_options_layer("sometimes", {})
+
+    def test_after_iter_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            solver_options_layer(("after_iter", -1), {})
+
+    def test_after_iter_non_int_rejected(self):
+        with self.assertRaises(ValueError):
+            solver_options_layer(("after_iter", 1.5), {})
+        with self.assertRaises(ValueError):
+            solver_options_layer(("after_iter", "5"), {})
+
+    def test_after_iter_bool_rejected(self):
+        # bool is an int subclass — guard against (after_iter, True)
+        with self.assertRaises(ValueError):
+            solver_options_layer(("after_iter", True), {})
+
+    def test_fold_rejects_invalid_predicate(self):
+        # Hand-built layer (bypasses solver_options_layer) is still validated
+        # by fold time.
+        bad_layers = [{"when": "huh", "options": {}}]
+        with self.assertRaises(ValueError):
+            fold_solver_options_layers(bad_layers, 0)
 
 
 if __name__ == "__main__":

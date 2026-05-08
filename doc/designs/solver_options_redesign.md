@@ -1,8 +1,10 @@
 # Solver-options redesign
 
-Status: design in progress. This first revision documents the **current**
-state only; redesign sections are stubs to be filled in after the as-is is
-agreed.
+Status: design complete; phased implementation in progress. This document
+covers the current state (§1), goals and non-goals (§2–3), resolved open
+questions (§4), the proposed design (§5), and the migration / compatibility
+plan (§6). Phase 1 (dormant layered representation) lands with this doc;
+phases 2–8 are scheduled per §6.4.
 
 Backward-compatibility constraint: every CLI flag and CLI value-syntax that
 works today must continue to work after the redesign. Programmatic-API
