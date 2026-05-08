@@ -86,7 +86,7 @@ def shared_options(cfg):
         shoptions["iterk_solver_options"] = copy.deepcopy(odict)
         shoptions["solver_options_layers"].append(
             sputils.solver_options_layer("default", odict))
-    # note that specific options usch as mipgap will override
+    # note that specific options such as mipgap will override
     if _hasit(cfg, "max_solver_threads"):
         shoptions["iter0_solver_options"]["threads"] = cfg.max_solver_threads
         shoptions["iterk_solver_options"]["threads"] = cfg.max_solver_threads
