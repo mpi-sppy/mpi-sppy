@@ -50,7 +50,7 @@ def _maybe_attach_jensens(spoke_dict, cfg, spoke_prefix,
         "scenario_creator_kwargs": scenario_creator_kwargs,
     }
 
-def shared_options(cfg):
+def shared_options(cfg, is_hub=False):
     shoptions = {
         "solver_name": cfg.solver_name,
         "defaultPHrho": cfg.default_rho,
@@ -106,7 +106,8 @@ def shared_options(cfg):
     if _hasit(cfg, "reduced_costs"):
         shoptions["rc_bound_tol"] = cfg.rc_bound_tol
     if _hasit(cfg, "solver_log_dir"):
-        shoptions["solver_log_dir"] = cfg.solver_log_dir
+        if is_hub or not cfg.get("hub_only_solver_logs", False):
+            shoptions["solver_log_dir"] = cfg.solver_log_dir
     if _hasit(cfg, "obbt"):
         shoptions["presolve_options"] = {
             "obbt" : cfg.obbt,
@@ -188,7 +189,7 @@ def ph_hub(
 ):
     from mpisppy.opt.ph import PH
     from mpisppy.cylinders.hub import PHHub
-    shoptions = shared_options(cfg)
+    shoptions = shared_options(cfg, is_hub=True)
     options = copy.deepcopy(shoptions)
     options["convthresh"] = cfg.intra_hub_conv_thresh
 
@@ -306,7 +307,7 @@ def subgradient_hub(cfg,
 ):
     from mpisppy.opt.subgradient import Subgradient
     from mpisppy.cylinders.hub import SubgradientHub
-    shoptions = shared_options(cfg)
+    shoptions = shared_options(cfg, is_hub=True)
     options = copy.deepcopy(shoptions)
     options["convthresh"] = cfg.intra_hub_conv_thresh
 
@@ -350,7 +351,7 @@ def fwph_hub(cfg,
 ):
     from mpisppy.opt.fwph import FWPH
     from mpisppy.cylinders.hub import FWPHHub
-    shoptions = shared_options(cfg)
+    shoptions = shared_options(cfg, is_hub=True)
     options = copy.deepcopy(shoptions)
     options["convthresh"] = cfg.intra_hub_conv_thresh
 
