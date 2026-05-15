@@ -42,6 +42,29 @@ Out of scope:
   `threads`.
 - Solver-pool / solver-per-rank dispatch.
 
+### 0.1 Solver-log options are not a `--solver-options` use case
+
+Passing solver-log flags (e.g. CPLEX `logfile`, Gurobi `LogFile`,
+HiGHS `log_file`) through `--solver-options` is almost always wrong in
+mpi-sppy. Each subproblem solves many times per iteration across many
+ranks; a single shared log path either overwrites itself, interleaves
+output from concurrent solves, or pins every rank to the same file —
+none of which produces a useful log.
+
+The mpi-sppy-blessed mechanism is `--solver-log-dir <directory>`
+(`popular_args`, config.py:213), which writes one log file per
+subproblem solve into the named directory, with names that
+disambiguate scenario and rank. To limit log volume to just hub-side
+solves (skipping spoke-side subproblem solves entirely), combine it
+with `--hub-only-solver-logs` (config.py:219). Both flags are exposed
+in `generic_cylinders.py` via `popular_args()`.
+
+Nothing in this redesign changes that. The layered representation,
+options-file, and translation table cover `mipgap`, `threads`, and
+similar solver-tuning knobs — not solver logging. Examples below use
+`presolve=2` (or similar non-log knobs) for illustrating parser and
+merge mechanics, deliberately avoiding `logfile`.
+
 ---
 
 ## 1. Current state ("as-is")
@@ -138,7 +161,7 @@ for arbitrary solver options. The JSON support that does exist
 
 The inverse is `option_dict_to_string` (sputils.py:690).
 
-Implication: the CLI value `"mipgap=0.01 threads=4 logfile=run.log"` works,
+Implication: the CLI value `"mipgap=0.01 threads=4 presolve=2"` works,
 but **values cannot contain spaces or `=`**. Quoting in the shell is on
 the user.
 
@@ -463,7 +486,7 @@ Schema (by example):
 
 ```json
 {
-  "default":   {"threads": 4, "logfile": "run.log"},
+  "default":   {"threads": 4, "presolve": 2},
   "iter0":     {"mipgap": 1e-4},
   "iterk":     {"mipgap": 1e-3},
   "after_iter": {
@@ -776,7 +799,7 @@ solver behavior.
 Concretely:
 
 ```
---solver-options "logfile=run.log threads=4"
+--solver-options "presolve=2 threads=4"
 --lagrangian-solver-options "mipgap=0.01"
 ```
 
@@ -784,7 +807,7 @@ Concretely:
 |---------------------------------|------------------------|---------------------------------------|
 | `mipgap`                        | 0.01                   | 0.01                                  |
 | `threads`                       | (only if `--max-solver-threads`) | 4                           |
-| `logfile`                       | not set                | `run.log`                             |
+| `presolve`                      | not set                | 2                                     |
 
 The new dict is a *superset* of the old one in every case where the
 spoke flag's parsed dict is a subset of the global flag's parsed dict,
@@ -881,7 +904,7 @@ New integration tests (added to existing test files where natural):
 
 - `--solver-options "..." --solver-options-file path.json` together:
   inline overlays file (§5.4 axis 2).
-- `--solver-options "logfile=run.log" --lagrangian-solver-options
+- `--solver-options "presolve=2" --lagrangian-solver-options
   "mipgap=0.01"` produces overlay (§6.2).
 - `--mipgaps-json {"5": 1e-5} --iterk-mipgap 0.001`: at k=3, mipgap
   is 0.001; at k=7, mipgap is 1e-5 (§5.4 worked example, executed).

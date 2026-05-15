@@ -283,7 +283,24 @@ command line.
 
 This specifies a directory where solver log files for *every* subproblem
 solve will be written. This directory will be created for the user and
-must *not* exist in advance.
+must *not* exist in advance. File names disambiguate scenario and rank,
+so concurrent solves do not clobber one another.
+
+If the per-solve log volume is too high, add
+``--hub-only-solver-logs`` to write logs only for hub-side solves
+(spoke-side subproblem solves are skipped). ``--hub-only-solver-logs``
+requires ``--solver-log-dir`` to also be set.
+
+.. warning::
+
+   Do **not** try to enable solver logging by passing a solver-specific
+   log flag through ``--solver-options`` (e.g.
+   ``--solver-options "logfile=run.log"`` for CPLEX, or the equivalent
+   ``LogFile`` / ``log_file`` for Gurobi / HiGHS). Because every
+   subproblem solve across every rank would share that one path, the
+   file overwrites itself or interleaves output from concurrent solves;
+   the resulting log is rarely useful. Use ``--solver-log-dir`` (with
+   ``--hub-only-solver-logs`` if needed) instead.
 
 ``warmstart-subproblems``
 --------------------------
