@@ -710,6 +710,79 @@ def option_dict_to_string(odict):
     return ostr
 
 
+# Solver-options layered representation. See
+# doc/designs/solver_options_redesign.md §5.2.
+#
+# A layer is a plain dict {"when": <predicate>, "options": <dict>}.
+# Predicates:
+#   "default"             — applies at every iteration
+#   "iter0"               — only at iteration 0
+#   "iterk"               — iterations k >= 1
+#   ("after_iter", N)     — iterations k >= N (N is int)
+
+
+def _validate_when(when):
+    """Raise ValueError if *when* is not a recognized layer predicate."""
+    if when in ("default", "iter0", "iterk"):
+        return
+    if isinstance(when, tuple) and len(when) == 2 and when[0] == "after_iter":
+        N = when[1]
+        # bool is a subclass of int; reject it explicitly
+        if isinstance(N, bool) or not isinstance(N, int) or N < 0:
+            raise ValueError(
+                f"after_iter predicate requires a non-negative int, got {N!r}")
+        return
+    raise ValueError(f"Unknown solver-options layer predicate: {when!r}")
+
+
+def solver_options_layer(when, options):
+    """Build a single solver-options layer.
+
+    Args:
+        when: predicate, one of "default", "iter0", "iterk", or
+            ("after_iter", N) with N a non-negative int.
+        options (dict): the options to fold in when the predicate matches.
+
+    Returns:
+        dict with keys "when" and "options".
+    """
+    _validate_when(when)
+    return {"when": when, "options": dict(options)}
+
+
+def _layer_matches(when, k):
+    _validate_when(when)
+    if when == "default":
+        return True
+    if when == "iter0":
+        return k == 0
+    if when == "iterk":
+        return k >= 1
+    # only ("after_iter", N) remains, validated above
+    return k >= when[1]
+
+
+def fold_solver_options_layers(layers, k):
+    """Fold a list of solver-options layers into one dict for iteration k.
+
+    Walks layers in list order, picks layers whose predicate matches k,
+    and flat-dict-unions their options into a running dict (last write
+    wins per key). See doc/designs/solver_options_redesign.md §5.4.
+
+    Args:
+        layers (list): list of layers as built by solver_options_layer.
+        k (int): iteration number (0 for iter0).
+
+    Returns:
+        dict: the merged options for iteration k.
+    """
+    folded = {}
+    for layer in layers:
+        if _layer_matches(layer["when"], k):
+            folded.update(layer["options"])
+    return folded
+
+
 ################################################################################
 # Various utilities related to scenario rank maps (some may not be in use)
 

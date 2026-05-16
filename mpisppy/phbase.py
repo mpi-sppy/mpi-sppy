@@ -284,6 +284,10 @@ class PHBase(mpisppy.spopt.SPOpt):
         self.iter0_solver_options = options["iter0_solver_options"]
         self.iterk_solver_options = options["iterk_solver_options"]
         self.current_solver_options = self.iter0_solver_options
+        # Phase-1 groundwork (doc/designs/solver_options_redesign.md
+        # §6.4 phase 1). Layer list is stored but not yet read by the
+        # solve path; iter0/iterk dicts above continue to drive solves.
+        self.solver_options_layers = options.get("solver_options_layers", [])
 
         # flags to complete the invariant
         self.convobject = None  # PH converger
