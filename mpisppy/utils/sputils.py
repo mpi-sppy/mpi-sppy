@@ -715,22 +715,31 @@ def option_dict_to_string(odict):
 #
 # A layer is a plain dict {"when": <predicate>, "options": <dict>}.
 # Predicates:
-#   "default"             — applies at every iteration
-#   "iter0"               — only at iteration 0
-#   "iterk"               — iterations k >= 1
-#   ("after_iter", N)     — iterations k >= N (N is int)
+#   "default"               — applies at every iteration
+#   "iter0"                 — only at iteration 0
+#   "iterk"                 — iterations k >= 1
+#   ("starting_at_iter", N) — iterations k >= N (N >= 1)
+#
+# N = 0 is rejected explicitly. A "matches every iteration" layer
+# should use the `default` predicate; using
+# ("starting_at_iter", 0) instead would silently rank the layer
+# above `iter0` / `iterk` in axis-1 specificity, which is rarely
+# what callers intend.
 
 
 def _validate_when(when):
     """Raise ValueError if *when* is not a recognized layer predicate."""
     if when in ("default", "iter0", "iterk"):
         return
-    if isinstance(when, tuple) and len(when) == 2 and when[0] == "after_iter":
+    if isinstance(when, tuple) and len(when) == 2 and when[0] == "starting_at_iter":
         N = when[1]
         # bool is a subclass of int; reject it explicitly
-        if isinstance(N, bool) or not isinstance(N, int) or N < 0:
+        if isinstance(N, bool) or not isinstance(N, int) or N < 1:
             raise ValueError(
-                f"after_iter predicate requires a non-negative int, got {N!r}")
+                f"starting_at_iter predicate requires an int >= 1; got "
+                f"{N!r}. Use the 'default' predicate for options that "
+                "apply at every iteration."
+            )
         return
     raise ValueError(f"Unknown solver-options layer predicate: {when!r}")
 
@@ -740,7 +749,8 @@ def solver_options_layer(when, options):
 
     Args:
         when: predicate, one of "default", "iter0", "iterk", or
-            ("after_iter", N) with N a non-negative int.
+            ("starting_at_iter", N) with N an int >= 1. (N = 0 is
+            rejected; use ``"default"`` instead.)
         options (dict): the options to fold in when the predicate matches.
 
     Returns:
@@ -758,7 +768,7 @@ def _layer_matches(when, k):
         return k == 0
     if when == "iterk":
         return k >= 1
-    # only ("after_iter", N) remains, validated above
+    # only ("starting_at_iter", N) remains, validated above
     return k >= when[1]
 
 
@@ -851,6 +861,147 @@ def translate_solver_options(opts, solver_name):
         else:
             out[target] = out.pop(canonical)
     return out
+
+
+# Recognized keys in a solver-options-file's per-section sub-block
+# (the top-level dict and each per-spoke sub-block share this shape).
+_OPTIONS_FILE_PREDICATES = ("default", "iter0", "iterk", "starting_at_iter")
+_OPTIONS_FILE_TOP_KEYS = _OPTIONS_FILE_PREDICATES + ("spokes",)
+_OPTIONS_FILE_SPOKE_KEYS = _OPTIONS_FILE_PREDICATES
+
+
+def _parse_options_file_section(section, source, *, allow_spokes):
+    """Validate one block of a solver-options file and normalize it.
+
+    Used both for the top-level (allow_spokes=True) and each per-spoke
+    sub-block (allow_spokes=False). Returns a dict with keys
+    "default", "iter0", "iterk" (each a dict, possibly empty),
+    "starting_at_iter" (dict[int, dict], possibly empty), and "spokes"
+    (dict[str, dict] when allowed; absent in spoke sub-blocks).
+    """
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"{source}: expected a JSON object, got {type(section).__name__}")
+    allowed = _OPTIONS_FILE_TOP_KEYS if allow_spokes else _OPTIONS_FILE_SPOKE_KEYS
+    extra = set(section) - set(allowed)
+    if extra:
+        raise ValueError(
+            f"{source}: unknown key(s) {sorted(extra)}; allowed: "
+            f"{sorted(allowed)}")
+    out = {p: dict(section.get(p) or {}) for p in ("default", "iter0", "iterk")}
+    raw_after = section.get("starting_at_iter") or {}
+    if not isinstance(raw_after, dict):
+        raise ValueError(
+            f"{source}.starting_at_iter: expected an object mapping iteration "
+            f"numbers to options dicts, got {type(raw_after).__name__}")
+    coerced_after = {}
+    for k, v in raw_after.items():
+        try:
+            N = int(k)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{source}.starting_at_iter: key {k!r} is not an integer") from None
+        if N < 1:
+            if N == 0:
+                raise ValueError(
+                    f"{source}.starting_at_iter: iteration index 0 is "
+                    "not allowed. Move these options into the 'default' "
+                    "sub-block if they should apply at every iteration."
+                )
+            raise ValueError(
+                f"{source}.starting_at_iter: iteration index must be >= 1; "
+                f"got {N}")
+        if not isinstance(v, dict):
+            raise ValueError(
+                f"{source}.starting_at_iter[{k}]: expected an options object, "
+                f"got {type(v).__name__}")
+        coerced_after[N] = dict(v)
+    out["starting_at_iter"] = coerced_after
+    if allow_spokes:
+        raw_spokes = section.get("spokes") or {}
+        if not isinstance(raw_spokes, dict):
+            raise ValueError(
+                f"{source}.spokes: expected an object mapping spoke "
+                f"names to sub-blocks, got {type(raw_spokes).__name__}")
+        out["spokes"] = {
+            spoke_name: _parse_options_file_section(
+                spoke_block,
+                f"{source}.spokes.{spoke_name}",
+                allow_spokes=False,
+            )
+            for spoke_name, spoke_block in raw_spokes.items()
+        }
+    return out
+
+
+def load_solver_options_file(path):
+    """Read a JSON solver-options file and return its parsed structure.
+
+    The file's shape (see doc/designs/solver_options_redesign.md §5.3):
+
+        {
+          "default":   {...},
+          "iter0":     {...},
+          "iterk":     {...},
+          "starting_at_iter": {"5": {...}, "10": {...}},
+          "spokes": {
+            "lagrangian": {"default": {...}, "iter0": {...}, ...},
+            "reduced_costs": {...}
+          }
+        }
+
+    All sub-blocks are optional; absent ones default to empty dicts so
+    callers can iterate uniformly. ``starting_at_iter`` keys are JSON strings
+    (JSON object keys must be strings) and are coerced to ints here.
+
+    Args:
+        path (str): path to a JSON file.
+
+    Returns:
+        dict: parsed structure with keys "default", "iter0", "iterk",
+        "starting_at_iter" (dict[int, dict]), and "spokes" (dict[str, sub-block]).
+
+    Raises:
+        ValueError: on unknown keys, malformed sub-blocks, or
+            non-integer ``starting_at_iter`` keys. The exception message
+            names the offending source path inside the file.
+    """
+    import json
+    with open(path) as fin:
+        try:
+            raw = json.load(fin)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path}: invalid JSON ({e})") from None
+    return _parse_options_file_section(raw, path, allow_spokes=True)
+
+
+def options_file_section_to_layers(section):
+    """Build the layer list for one parsed sub-block in axis-1 order.
+
+    The returned list folds (via fold_solver_options_layers) in the
+    order most-general → most-specific so that more-specific
+    predicates naturally win for any iteration that matches both.
+
+    Args:
+        section (dict): output of ``_parse_options_file_section`` (or
+            one of the per-spoke sub-blocks).
+
+    Returns:
+        list[dict]: layers in order [default, iter0, iterk,
+        starting_at_iter:N₁, starting_at_iter:N₂, ...] (starting_at_iter sorted by
+        ascending N). Sub-blocks that are empty contribute nothing.
+    """
+    layers = []
+    if section["default"]:
+        layers.append(solver_options_layer("default", section["default"]))
+    if section["iter0"]:
+        layers.append(solver_options_layer("iter0", section["iter0"]))
+    if section["iterk"]:
+        layers.append(solver_options_layer("iterk", section["iterk"]))
+    for N in sorted(section["starting_at_iter"]):
+        layers.append(
+            solver_options_layer(("starting_at_iter", N), section["starting_at_iter"][N]))
+    return layers
 
 
 ################################################################################
