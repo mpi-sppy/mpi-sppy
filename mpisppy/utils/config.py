@@ -622,11 +622,11 @@ class Config(pyofig.ConfigDict):
         else:
             name = name+"_"
 
-        if name == "":
-            self.add_to_config('mipgaps_json',
-                               description="path to json file with a mipgap schedule for PH iterations",
-                               domain=str,
-                               default=None)
+        self.add_to_config(f'{name}mipgaps_json',
+                           description="path to json file with a mipgap schedule for PH iterations "
+                                       "(planned for deprecation in a future release)",
+                           domain=str,
+                           default=None)
 
         self.add_to_config(f'{name}starting_mipgap',
                            description="Sets automatic gapper mode and the starting and minimum mipgap",
