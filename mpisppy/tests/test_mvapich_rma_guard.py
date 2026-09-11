@@ -46,6 +46,25 @@ class TestMVAPICHRMAGuard(unittest.TestCase):
                 window_comm, _FakeComm(), 0)
         self.assertEqual(window_comm.allgather_calls, 0)
 
+    def test_newer_mvapich_version_is_not_checked(self):
+        window_comm = _FakeComm()
+        with self._vendor(version=(2, 3, 8)), self._processor_name():
+            spcommunicator._guard_mvapich_cross_node_rma(
+                window_comm, _FakeComm(), 0)
+        self.assertEqual(window_comm.allgather_calls, 0)
+
+    def test_older_mvapich_cross_node_window_warns_and_continues(self):
+        window_comm = _FakeComm(("node-a", "node-b"))
+        with self._vendor(version=(2, 3, 6)), self._processor_name(), \
+                warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            spcommunicator._guard_mvapich_cross_node_rma(
+                window_comm, _FakeComm(), 0)
+
+        self.assertEqual(len(caught), 1)
+        self.assertIn("MVAPICH 2.3.6", str(caught[0].message))
+        self.assertIn("earlier releases are unverified", str(caught[0].message))
+
     def test_node_local_window_is_allowed(self):
         window_comm = _FakeComm(("node-a", "node-a"))
         with self._vendor(), self._processor_name():

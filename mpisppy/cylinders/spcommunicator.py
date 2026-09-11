@@ -95,15 +95,16 @@ _ALLOW_UNSAFE_MVAPICH_RMA_ENV = "MPISPPY_ALLOW_UNSAFE_MVAPICH_RMA"
 
 def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
                                    flexible_ranks=False):
-    """Reject a confirmed-unsafe MVAPICH cross-node RMA configuration."""
+    """Reject confirmed-unsafe, and warn about older, MVAPICH cross-node RMA."""
     get_vendor = getattr(MPI, "get_vendor", None)
     get_processor_name = getattr(MPI, "Get_processor_name", None)
     if get_vendor is None or get_processor_name is None:
         return
 
     vendor_name, vendor_version = get_vendor()
+    vendor_version = tuple(vendor_version)
     if (vendor_name != "MVAPICH"
-            or tuple(vendor_version) != _UNSAFE_MVAPICH_RMA_VERSION):
+            or vendor_version > _UNSAFE_MVAPICH_RMA_VERSION):
         return
 
     local_hosts = window_comm.allgather(get_processor_name())
@@ -112,11 +113,6 @@ def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
     if not any_cross_node:
         return
 
-    allow_unsafe = fullcomm.bcast(
-        os.environ.get(_ALLOW_UNSAFE_MVAPICH_RMA_ENV) == "1"
-        if global_rank == 0 else None,
-        root=0,
-    )
     if flexible_ranks:
         workaround = (
             "Unequal-rank cylinders place their window on MPI_COMM_WORLD, so "
@@ -129,10 +125,30 @@ def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
             "number of cylinders so every strata communicator is node-local, "
             "or use a different MPI implementation."
         )
+
+    if vendor_version < _UNSAFE_MVAPICH_RMA_VERSION:
+        if global_rank == 0:
+            warnings.warn(
+                f"mpi-sppy detected MVAPICH {'.'.join(map(str, vendor_version))} "
+                "and an MPI RMA window communicator that spans nodes. "
+                "Cross-node RMA failures are confirmed with MVAPICH 2.3.7; "
+                "earlier releases are unverified but may contain the same "
+                f"defect. {workaround}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return
+
+    allow_unsafe = fullcomm.bcast(
+        os.environ.get(_ALLOW_UNSAFE_MVAPICH_RMA_ENV) == "1"
+        if global_rank == 0 else None,
+        root=0,
+    )
     message = (
         "mpi-sppy detected MVAPICH 2.3.7 and an MPI RMA window communicator "
-        "that spans nodes. A minimal two-rank reproducer confirms intermittent "
-        "cross-node MPI_Get hangs with this MPI version. "
+        "that spans nodes. Testing has reproduced intermittent cross-node "
+        "MPI_Get hangs with this MPI version, and production runs have also "
+        "exhibited heap corruption and segmentation faults. "
         f"{workaround} Set {_ALLOW_UNSAFE_MVAPICH_RMA_ENV}=1 to continue at "
         "your own risk."
     )
