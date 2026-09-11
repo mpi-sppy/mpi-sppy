@@ -96,7 +96,7 @@ _MVAPICH_VENDOR_NAMES = frozenset(("MVAPICH", "MVAPICH2"))
 
 def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
                                    flexible_ranks=False):
-    """Reject confirmed-unsafe, and warn about older, MVAPICH cross-node RMA."""
+    """Reject MVAPICH <= 2.3.7 cross-node RMA unless explicitly overridden."""
     get_vendor = getattr(MPI, "get_vendor", None)
     get_processor_name = getattr(MPI, "Get_processor_name", None)
     if get_vendor is None or get_processor_name is None:
@@ -127,31 +127,29 @@ def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
             "or use a different MPI implementation."
         )
 
-    if vendor_version < _UNSAFE_MVAPICH_RMA_VERSION:
-        if global_rank == 0:
-            warnings.warn(
-                f"mpi-sppy detected MVAPICH {'.'.join(map(str, vendor_version))} "
-                "and an MPI RMA window communicator that spans nodes. "
-                "Intermittent cross-node RMA failures have been observed with "
-                "MVAPICH 2.3.7 on one HPC system; it is not known whether the "
-                "behavior is specific to that environment. Earlier releases "
-                f"have not been tested and may also be affected. {workaround}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        return
-
     allow_unsafe = fullcomm.bcast(
         os.environ.get(_ALLOW_UNSAFE_MVAPICH_RMA_ENV) == "1"
         if global_rank == 0 else None,
         root=0,
     )
+    version_text = ".".join(map(str, vendor_version))
+    if vendor_version < _UNSAFE_MVAPICH_RMA_VERSION:
+        evidence = (
+            "Intermittent cross-node RMA failures have been observed with "
+            "MVAPICH 2.3.7 on one HPC system; it is not known whether the "
+            "behavior is specific to that environment. This earlier release "
+            "has not been tested and is being guarded as a precaution. "
+        )
+    else:
+        evidence = (
+            "On one HPC system, this configuration has produced intermittent "
+            "cross-node MPI_Get hangs, heap corruption, and segmentation "
+            "faults; it is not known whether the behavior is specific to that "
+            "environment. "
+        )
     message = (
-        "mpi-sppy detected MVAPICH 2.3.7 and an MPI RMA window communicator "
-        "that spans nodes. On one HPC system, this configuration has produced "
-        "intermittent cross-node MPI_Get hangs, heap corruption, and "
-        "segmentation faults; it is not known whether the behavior is specific "
-        "to that environment. "
+        f"mpi-sppy detected MVAPICH {version_text} and an MPI RMA window "
+        f"communicator that spans nodes. {evidence}"
         "As a precaution, mpi-sppy will not use this configuration by default. "
         f"{workaround} Set {_ALLOW_UNSAFE_MVAPICH_RMA_ENV}=1 to continue at "
         "your own risk."

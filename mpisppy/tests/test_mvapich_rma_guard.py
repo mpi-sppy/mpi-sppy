@@ -62,17 +62,29 @@ class TestMVAPICHRMAGuard(unittest.TestCase):
                 window_comm, _FakeComm(), 0)
         self.assertEqual(window_comm.allgather_calls, 0)
 
-    def test_older_mvapich_cross_node_window_warns_and_continues(self):
+    def test_older_mvapich_cross_node_window_is_rejected(self):
         window_comm = _FakeComm(("node-a", "node-b"))
         with self._vendor(version=(2, 3, 6)), self._processor_name(), \
-                warnings.catch_warnings(record=True) as caught:
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(
+                spcommunicator._ALLOW_UNSAFE_MVAPICH_RMA_ENV, None)
+            with self.assertRaisesRegex(
+                    RuntimeError, "earlier release has not been tested"):
+                spcommunicator._guard_mvapich_cross_node_rma(
+                    window_comm, _FakeComm(), 0)
+
+    def test_older_mvapich_can_be_explicitly_overridden(self):
+        window_comm = _FakeComm(("node-a", "node-b"))
+        with self._vendor(version=(2, 3, 6)), self._processor_name(), \
+                mock.patch.dict(os.environ, {
+                    spcommunicator._ALLOW_UNSAFE_MVAPICH_RMA_ENV: "1",
+                }, clear=False), warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             spcommunicator._guard_mvapich_cross_node_rma(
                 window_comm, _FakeComm(), 0)
 
         self.assertEqual(len(caught), 1)
         self.assertIn("MVAPICH 2.3.6", str(caught[0].message))
-        self.assertIn("Earlier releases have not been tested", str(caught[0].message))
 
     def test_node_local_window_is_allowed(self):
         window_comm = _FakeComm(("node-a", "node-a"))
