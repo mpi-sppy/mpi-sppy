@@ -63,7 +63,7 @@ class TestMVAPICHRMAGuard(unittest.TestCase):
 
         self.assertEqual(len(caught), 1)
         self.assertIn("MVAPICH 2.3.6", str(caught[0].message))
-        self.assertIn("earlier releases are unverified", str(caught[0].message))
+        self.assertIn("Earlier releases have not been tested", str(caught[0].message))
 
     def test_node_local_window_is_allowed(self):
         window_comm = _FakeComm(("node-a", "node-a"))
