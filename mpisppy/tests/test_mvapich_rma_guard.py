@@ -81,6 +81,16 @@ class TestMVAPICHRMAGuard(unittest.TestCase):
                 spcommunicator._guard_mvapich_cross_node_rma(
                     window_comm, _FakeComm(), 0)
 
+    def test_mvapich2_vendor_alias_is_rejected(self):
+        window_comm = _FakeComm(("node-a", "node-b"))
+        with self._vendor(name="MVAPICH2"), self._processor_name(), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(
+                spcommunicator._ALLOW_UNSAFE_MVAPICH_RMA_ENV, None)
+            with self.assertRaisesRegex(RuntimeError, "cross-node MPI_Get"):
+                spcommunicator._guard_mvapich_cross_node_rma(
+                    window_comm, _FakeComm(), 0)
+
     def test_cross_node_result_is_shared_across_fullcomm(self):
         window_comm = _FakeComm(("node-a", "node-a"))
         fullcomm = _FakeComm(reduced_result=True)

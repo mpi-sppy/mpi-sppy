@@ -91,6 +91,7 @@ _STRICT_COHERENCE_FIELDS = frozenset((
 
 _UNSAFE_MVAPICH_RMA_VERSION = (2, 3, 7)
 _ALLOW_UNSAFE_MVAPICH_RMA_ENV = "MPISPPY_ALLOW_UNSAFE_MVAPICH_RMA"
+_MVAPICH_VENDOR_NAMES = frozenset(("MVAPICH", "MVAPICH2"))
 
 
 def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
@@ -103,7 +104,7 @@ def _guard_mvapich_cross_node_rma(window_comm, fullcomm, global_rank,
 
     vendor_name, vendor_version = get_vendor()
     vendor_version = tuple(vendor_version)
-    if (vendor_name != "MVAPICH"
+    if (vendor_name not in _MVAPICH_VENDOR_NAMES
             or vendor_version > _UNSAFE_MVAPICH_RMA_VERSION):
         return
 
